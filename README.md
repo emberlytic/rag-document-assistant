@@ -1,5 +1,7 @@
 # Legal & HR Document Assistant (RAG)
 
+![tests](https://github.com/emberlytic/rag-document-assistant/actions/workflows/tests.yml/badge.svg)
+
 > Answers legal and HR compliance questions from a library of source documents, with every claim tied to a citation (filename, page, version) -- and no number rewritten to "look right" if it disagrees with the LLM's training data.
 
 ## The Problem
@@ -115,6 +117,15 @@ This repo ships three pre-configured demos, selectable by `demo` name (`demos/re
 - **`tech_support`** -- Technical documentation assistant over FastAPI's public docs
 
 Each demo is a `DemoConfig` (`demos/__init__.py`) pairing a system prompt, a data directory, and a fetch script. Adapting to a new document set means writing a new `DemoConfig` and fetch script -- the retrieval and generation pipeline is shared.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+Tests cover the document registry (versioning, change detection), chunking and PDF-cleanup logic, hybrid retrieval's ranking behavior, provider selection and prompt construction in the generator, and the demo registry -- all with the vector store and LLM API calls mocked, so no ChromaDB data, API key, or network access is needed. Note that importing `core.retriever` or `core.ingestion` still pulls in `chromadb` and `sentence-transformers` transitively (they're used elsewhere in those modules), so `requirements-dev.txt` installs the full dependency set even though the tests themselves don't call those services. CI runs the same suite on every push via GitHub Actions (`.github/workflows/tests.yml`).
 
 ## Case Study
 
