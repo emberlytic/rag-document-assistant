@@ -22,15 +22,20 @@ Embeddings and retrieval always run locally (sentence-transformers + ChromaDB on
 
 ```mermaid
 flowchart LR
-    A[PDF / TXT Docs] --> B[Parse + Chunk]
-    B --> C[SQLite Doc Registry<br/>hash + version tracking]
-    B --> D[Local Embeddings<br/>all-MiniLM-L6-v2]
-    D --> E[ChromaDB<br/>vector store]
+    subgraph Container["Docker: api + ui"]
+        A[PDF / TXT Docs] --> B[Parse + Chunk]
+        B --> C[SQLite Doc Registry<br/>hash + version tracking]
+        B --> D[Local Embeddings<br/>all-MiniLM-L6-v2]
+        D --> E[ChromaDB<br/>vector store]
 
-    F[User Question] --> G[Hybrid Retrieval<br/>BM25 + Vector + RRF]
-    E --> G
-    G --> H[LLM API<br/>Claude / OpenAI / Gemini / Ollama]
-    H --> I[Cited Answer]
+        F[User Question] --> G[Hybrid Retrieval<br/>BM25 + Vector + RRF]
+        E --> G
+        G --> H[LLM API<br/>Claude / OpenAI / Gemini / Ollama]
+        H -- fails / breaker open --> J[Circuit Breaker<br/>fallback to next provider]
+        J --> H
+        H --> I[Cited Answer]
+        H -.-> M[/metrics<br/>+ structured logs/]
+    end
 ```
 
 ## Stack
@@ -145,7 +150,7 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-Tests cover the document registry (versioning, change detection), chunking and PDF-cleanup logic, hybrid retrieval's ranking behavior, provider selection and prompt construction in the generator, and the demo registry -- all with the vector store and LLM API calls mocked, so no ChromaDB data, API key, or network access is needed. Note that importing `core.retriever` or `core.ingestion` still pulls in `chromadb` and `sentence-transformers` transitively (they're used elsewhere in those modules), so `requirements-dev.txt` installs the full dependency set even though the tests themselves don't call those services. CI runs the same suite on every push via GitHub Actions (`.github/workflows/tests.yml`).
+Tests cover the document registry (versioning, change detection), chunking and PDF-cleanup logic, hybrid retrieval's ranking behavior, provider selection and prompt construction in the generator, the demo registry, and the production-hardening additions -- the `SecretsProvider` interface (env vs. stubbed cloud backend), and the circuit breaker's full state machine (`tests/test_resilience.py`): opens on hitting the failure threshold, half-opens after the cooldown, recovers to closed on a successful probe, and re-opens if that probe fails. `tests/test_generator.py` covers the fallback chain itself -- skipping a provider whose breaker is open, failing over to the next provider on an error, and raising once every provider is exhausted. All of this runs with the vector store and LLM API calls mocked, so no ChromaDB data, API key, or network access is needed. Note that importing `core.retriever` or `core.ingestion` still pulls in `chromadb` and `sentence-transformers` transitively (they're used elsewhere in those modules), so `requirements-dev.txt` installs the full dependency set even though the tests themselves don't call those services. CI runs the same suite on every push via GitHub Actions (`.github/workflows/tests.yml`).
 
 ## How This Maps to Production
 
