@@ -1,6 +1,9 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
+
+from core.secrets import secrets_provider
+from core.resilience import get_breaker
 
 load_dotenv()
 
@@ -33,16 +36,18 @@ class GenerationResult:
     answer: str
     provider: str
     model: str
+    attempts: list[str] = field(default_factory=list)
 
 
 def available_providers() -> list[dict]:
     """Return providers that have credentials configured."""
+    secrets = secrets_provider()
     providers = []
-    if os.getenv("ANTHROPIC_API_KEY"):
+    if secrets.get("ANTHROPIC_API_KEY"):
         providers.append({"id": "claude",  "label": f"Claude · {_MODELS['claude']}",  "model": _MODELS["claude"]})
-    if os.getenv("OPENAI_API_KEY"):
+    if secrets.get("OPENAI_API_KEY"):
         providers.append({"id": "openai",  "label": f"OpenAI · {_MODELS['openai']}", "model": _MODELS["openai"]})
-    if os.getenv("GOOGLE_API_KEY"):
+    if secrets.get("GOOGLE_API_KEY"):
         providers.append({"id": "gemini",  "label": f"Gemini · {_MODELS['gemini']}", "model": _MODELS["gemini"]})
     # Ollama needs no key — always listed
     providers.append({"id": "ollama", "label": f"Ollama · {_MODELS['ollama']} (local)", "model": _MODELS["ollama"]})
@@ -58,15 +63,36 @@ def generate_with_meta(query: str, chunks: list[dict], system_prompt: str = "", 
 
 
 def _dispatch(query: str, chunks: list[dict], system_prompt: str, provider: str) -> GenerationResult:
-    p = (provider or os.getenv("LLM_BACKEND", "claude")).lower()
+    requested = (provider or os.getenv("LLM_BACKEND", "claude")).lower()
     user_msg = _build_user_message(query, chunks, system_prompt)
-    if p == "openai":
-        return _openai(user_msg)
-    if p == "gemini":
-        return _gemini(user_msg)
-    if p == "ollama":
-        return _ollama(user_msg)
-    return _claude(user_msg)
+
+    chain = [requested] + [p["id"] for p in available_providers() if p["id"] != requested]
+
+    attempts: list[str] = []
+    last_exc: Exception | None = None
+    for provider_id in chain:
+        func = globals().get(f"_{provider_id}")
+        if func is None:
+            continue
+        breaker = get_breaker(provider_id)
+        if not breaker.allow_request():
+            attempts.append(f"{provider_id}:breaker_open")
+            continue
+        try:
+            result = func(user_msg)
+        except Exception as exc:
+            breaker.record_failure()
+            attempts.append(f"{provider_id}:error")
+            last_exc = exc
+            continue
+        breaker.record_success()
+        attempts.append(f"{provider_id}:ok")
+        result.attempts = attempts
+        return result
+
+    error = RuntimeError(f"All providers failed or unavailable: {attempts}")
+    error.attempts = attempts
+    raise error from last_exc
 
 
 def _build_user_message(query: str, chunks: list[dict], extra: str) -> str:
@@ -81,7 +107,7 @@ def _build_user_message(query: str, chunks: list[dict], extra: str) -> str:
 
 def _claude(user_msg: str) -> GenerationResult:
     import anthropic
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    client = anthropic.Anthropic(api_key=secrets_provider().get("ANTHROPIC_API_KEY"))
     model = _MODELS["claude"]
     resp = client.messages.create(
         model=model,
@@ -95,7 +121,7 @@ def _claude(user_msg: str) -> GenerationResult:
 def _openai(user_msg: str) -> GenerationResult:
     from openai import OpenAI
     model = _MODELS["openai"]
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = OpenAI(api_key=secrets_provider().get("OPENAI_API_KEY"))
     resp = client.chat.completions.create(
         model=model,
         max_tokens=1024,
@@ -109,7 +135,7 @@ def _openai(user_msg: str) -> GenerationResult:
 
 def _gemini(user_msg: str) -> GenerationResult:
     import google.generativeai as genai
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+    genai.configure(api_key=secrets_provider().get("GOOGLE_API_KEY"))
     model = _MODELS["gemini"]
     m = genai.GenerativeModel(model_name=model, system_instruction=_BASE_SYSTEM)
     resp = m.generate_content(user_msg)
