@@ -2,11 +2,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import os
 import html
 import httpx
 import streamlit as st
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -476,10 +477,17 @@ with tab_chat:
                     data = r.json()
                     answer = data["answer"]
                     sources = data["sources"]
+                    attempts = data.get("attempts", [])
 
                     st.markdown(answer)
 
                     provider_label = selected_provider["label"]
+                    fell_back = len(attempts) > 1
+                    if fell_back:
+                        st.caption(
+                            f"⚠ {selected_provider['id']} was unavailable, answered by "
+                            f"**{data['provider']}** instead ({' → '.join(attempts)})"
+                        )
                     label = f"📚 {len(sources)} sources · {provider_label}"
                     with st.expander(label, expanded=True):
                         cards_html = "".join(

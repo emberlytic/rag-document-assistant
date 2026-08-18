@@ -6,12 +6,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from core.ingestion import ingest_directory
 from core.retriever import retrieve
-from core.generator import generate
+from core.generator import generate_with_meta
 from core.doc_registry import list_docs
+from core.observability import track_query, render_prometheus
 from demos.registry import ALL_DEMOS, get_demo
 
 app = FastAPI(
@@ -51,6 +53,8 @@ class Source(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
+    provider: str
+    attempts: list[str]
     sources: list[Source]
 
 
@@ -102,13 +106,25 @@ def sync(req: IngestRequest):
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest):
     demo = get_demo(req.demo)
-    chunks = retrieve(demo.collection, req.question, top_k=req.top_k)
-    if not chunks:
-        raise HTTPException(
-            status_code=404,
-            detail="No relevant documents found. Make sure data has been ingested first.",
-        )
-    answer = generate(req.question, chunks, system_prompt=demo.system_prompt, provider=req.provider)
+    with track_query(req.demo) as info:
+        chunks = retrieve(demo.collection, req.question, top_k=req.top_k)
+        if not chunks:
+            raise HTTPException(
+                status_code=404,
+                detail="No relevant documents found. Make sure data has been ingested first.",
+            )
+        try:
+            result = generate_with_meta(
+                req.question, chunks, system_prompt=demo.system_prompt, provider=req.provider
+            )
+        except RuntimeError as exc:
+            info["attempts"] = getattr(exc, "attempts", [])
+            raise HTTPException(status_code=502, detail=str(exc))
+
+        info["provider"] = result.provider
+        info["attempts"] = result.attempts
+        info["success"] = True
+
     sources = [
         Source(
             text=c["text"],
@@ -119,7 +135,12 @@ def query(req: QueryRequest):
         )
         for c in chunks
     ]
-    return QueryResponse(answer=answer, sources=sources)
+    return QueryResponse(answer=result.answer, provider=result.provider, attempts=result.attempts, sources=sources)
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics():
+    return render_prometheus()
 
 
 @app.get("/documents/{demo}", response_model=list[DocumentInfo])

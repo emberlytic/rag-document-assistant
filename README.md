@@ -46,6 +46,23 @@ flowchart LR
 
 ## How to Run
 
+### Docker
+
+```bash
+git clone https://github.com/emberlytic/rag-document-assistant.git
+cd rag-document-assistant
+cp .env.example .env
+# edit .env -- set at least one provider API key, or leave only Ollama configured
+
+docker compose up --build
+# API:  http://localhost:8000
+# UI:   http://localhost:8501
+```
+
+Ingested data (ChromaDB + the SQLite registry) persists in a named volume across restarts. This is the same code path as the manual setup below -- containerization doesn't change behavior, just how it's run.
+
+### Manual (venv)
+
 **1. Clone and install**
 ```bash
 git clone https://github.com/emberlytic/rag-document-assistant.git
@@ -88,10 +105,12 @@ curl -X POST localhost:8000/query -H "Content-Type: application/json" \
   -d '{"demo": "legal", "question": "What are the OSHA hazard communication requirements for chemicals?"}'
 ```
 
-**Sample response** (`provider` defaults to `LLM_BACKEND` in `.env`; pass `"provider": "claude"` etc. to override per query):
+**Sample response** (`provider` in the request defaults to `LLM_BACKEND` in `.env`; pass `"provider": "claude"` etc. to override per query. If the requested provider fails or its circuit breaker is open, the request transparently falls back to the next configured provider -- `attempts` shows what was tried):
 ```json
 {
   "answer": "## Employer Requirements for Chemical Hazard Communication\n\n**Chemical Inventory & Labeling:** Keep a current list of hazardous chemicals in the workplace and ensure containers are properly labeled with hazard warnings [Source: osha_employer_responsibilities_handbook.pdf | Page 11 | Version 1].\n\n**Safety Data Sheets:** Make Safety Data Sheets available to workers, readily accessible without leaving their work area [Source: osha_hazard_communication.pdf | Page 7 | Version 1].\n\n**Governing Standard:** These requirements fall under 29 CFR 1910.1200, aligned with the UN Globally Harmonized System (GHS) [Source: osha_hazard_communication.pdf | Page 7 | Version 1].",
+  "provider": "claude",
+  "attempts": ["claude:ok"],
   "sources": [
     {"text": "...", "source": "osha_hazard_communication.pdf", "page": 7, "version": 1, "score": 1.0}
   ]
@@ -107,6 +126,7 @@ curl -X POST localhost:8000/query -H "Content-Type: application/json" \
 | `/sync` | POST | Re-runs the demo's fetch script, then ingests -- picks up updated source documents |
 | `/query` | POST | `{"demo", "question", "top_k", "provider"}` -- returns a cited answer and its source chunks |
 | `/documents/{demo}` | GET | Lists ingested documents with version and status |
+| `/metrics` | GET | Prometheus-format request counts, latency, and per-provider circuit breaker state |
 
 ## Included Demos
 
@@ -126,6 +146,15 @@ pytest -v
 ```
 
 Tests cover the document registry (versioning, change detection), chunking and PDF-cleanup logic, hybrid retrieval's ranking behavior, provider selection and prompt construction in the generator, and the demo registry -- all with the vector store and LLM API calls mocked, so no ChromaDB data, API key, or network access is needed. Note that importing `core.retriever` or `core.ingestion` still pulls in `chromadb` and `sentence-transformers` transitively (they're used elsewhere in those modules), so `requirements-dev.txt` installs the full dependency set even though the tests themselves don't call those services. CI runs the same suite on every push via GitHub Actions (`.github/workflows/tests.yml`).
+
+## How This Maps to Production
+
+This repo is a demo, and some pieces are intentionally scoped down. Here's what's demo-scope versus what a real deployment would need:
+
+- **Containerization** -- `Dockerfile` and `docker-compose.yml` are the real deployment unit here, not a demo prop. What's missing for a production cluster: an orchestrator (Kubernetes/ECS) for multi-instance scaling, and a managed Postgres/Chroma-Cloud-style vector store instead of the on-disk SQLite/ChromaDB pairing, which assumes a single instance with persistent local storage.
+- **Secrets** -- `core/secrets.py` defines a `SecretsProvider` interface so the app doesn't call `os.getenv()` directly. The demo backs it with plain environment variables (`EnvSecretsProvider`). A real deployment would back it with a real secrets manager (AWS Secrets Manager, Vault) -- `CloudSecretsProvider` is a stub marking that swap point, not a working integration, because there's no cloud infrastructure here to integrate with honestly.
+- **Provider fallback** -- `core/resilience.py` implements a real per-provider circuit breaker (closed/open/half-open with a failure threshold and cooldown), and `core/generator.py` uses it to fail over to the next configured provider on error. This is genuine failover logic, not a mock. What's demo-scope: breaker state is in-process and resets on restart. A multi-worker production deployment would need that state shared (e.g. Redis) so all workers agree on which providers are healthy.
+- **Observability** -- `/metrics` returns real Prometheus-format counters and a real circuit-breaker gauge, and every query logs a structured JSON line. What's missing: this repo doesn't ship a Prometheus server or Grafana dashboard to consume it -- wiring up the metrics endpoint to actual monitoring infrastructure is left as the next step, since standing up and maintaining that infrastructure isn't demonstrable in a single-repo portfolio project.
 
 ## Case Study
 
